@@ -65,6 +65,18 @@ streamlit run app.py
 - Random Forest Accuracy: 99.95%
 - XGBoost Accuracy: 99.92%
 
+  ## Dataset
+
+The dataset is not included in this repository due to its size.
+
+Download the dataset from Kaggle:
+
+https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud
+
+Place the downloaded file here:
+
+data/creditcard.csv
+
 ## 👨‍💻 Author
 
 Palavali Charan Kumar Reddy
