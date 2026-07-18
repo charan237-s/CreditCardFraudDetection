@@ -1,309 +1,335 @@
+# ==========================================================
+# CUSTOMER CHURN PREDICTION — OFFLINE TRAINING SCRIPT
+#
+# IMPORTANT: This script is NOT part of the deployed app.
+# Run it locally / once, BEFORE deploying app.py, to generate:
+#   - data/customer_churn_clean.csv
+#   - images/*.png              (EDA charts)
+#   - models/churn_model.pkl
+#   - models/scaler.pkl
+#   - models/metrics.json       (accuracy, precision, recall, f1)
+#   - models/feature_importance.csv
+#
+# app.py never imports or executes this file. Deployment should
+# only ever point at app.py. This script is wrapped in a
+# `if __name__ == "__main__":` guard so it can never fire by
+# accident if something imports it as a module.
+#
+#   Usage:  python train.py
+# ==========================================================
+
 import os
-import joblib
+import json
+import datetime
+
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
+import numpy as np
 
-from sklearn.linear_model import LogisticRegression
-from xgboost import XGBClassifier
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import (
-    accuracy_score,
-    classification_report,
-    confusion_matrix,
-    roc_auc_score,
-    ConfusionMatrixDisplay
-)
 
-from imblearn.over_sampling import SMOTE
+# ==========================================================
+# PART 1 — LOAD & CLEAN
+# ==========================================================
 
-# ==========================================
-# CREATE FOLDERS
-# ==========================================
+def load_and_clean_data(path="data/customer_churn.csv"):
 
-os.makedirs("images", exist_ok=True)
-os.makedirs("models", exist_ok=True)
+    print("=" * 60)
+    print("CUSTOMER CHURN PREDICTION — TRAINING PIPELINE")
+    print("=" * 60)
 
-# ==========================================
-# LOAD DATASET
-# ==========================================
+    try:
+        df = pd.read_csv(path)
+        print(f"\nDataset loaded successfully from '{path}'.")
+    except Exception as e:
+        print(f"Dataset loading failed: {e}")
+        raise SystemExit(1)
 
-print("=" * 60)
-print("LOADING DATASET...")
-print("=" * 60)
+    print(f"Shape: {df.shape[0]} rows, {df.shape[1]} columns")
 
-df = pd.read_csv("data/creditcard.csv")
+    duplicates = df.duplicated().sum()
+    print(f"Duplicate rows found: {duplicates}")
+    df = df.drop_duplicates()
 
-print("\nDataset Loaded Successfully!")
+    if "TotalCharges" in df.columns:
+        df["TotalCharges"] = pd.to_numeric(df["TotalCharges"], errors="coerce")
 
-# ==========================================
-# BASIC INFORMATION
-# ==========================================
+    missing_before = df.isnull().sum().sum()
+    df.fillna(df.median(numeric_only=True), inplace=True)
+    print(f"Missing values filled (numeric median): {missing_before} cells")
 
-print("\nFirst 5 Rows")
-print(df.head())
+    os.makedirs("data", exist_ok=True)
+    df.to_csv("data/customer_churn_clean.csv", index=False)
+    print("Clean dataset saved to 'data/customer_churn_clean.csv'")
+    print("PART 1 COMPLETE\n")
 
-print("\nShape")
-print(df.shape)
+    return df
 
-print("\nColumns")
-print(df.columns)
 
-print("\nDataset Info")
-print(df.info())
+# ==========================================================
+# PART 2 — EXPLORATORY DATA ANALYSIS
+# ==========================================================
 
-print("\nMissing Values")
-print(df.isnull().sum())
+def run_eda(df):
 
-print("\nDuplicate Rows :", df.duplicated().sum())
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    from sklearn.preprocessing import LabelEncoder
 
-# ==========================================
-# REMOVE DUPLICATES
-# ==========================================
+    print("=" * 60)
+    print("EXPLORATORY DATA ANALYSIS")
+    print("=" * 60)
 
-df = df.drop_duplicates()
+    os.makedirs("images", exist_ok=True)
+    plt.style.use("ggplot")
+    sns.set_theme()
 
-print("\nDataset Shape After Removing Duplicates")
-print(df.shape)
+    plots = [
+        ("Churn", None, "Customer Churn Distribution", "churn_distribution.png"),
+        ("gender", "Churn", "Gender vs Churn", "gender_vs_churn.png"),
+        ("SeniorCitizen", "Churn", "Senior Citizen vs Churn", "senior_vs_churn.png"),
+        ("Partner", "Churn", "Partner vs Churn", "partner_vs_churn.png"),
+        ("Dependents", "Churn", "Dependents vs Churn", "dependents_vs_churn.png"),
+        ("Contract", "Churn", "Contract Type vs Churn", "contract_vs_churn.png"),
+        ("InternetService", "Churn", "Internet Service vs Churn", "internet_vs_churn.png"),
+    ]
 
-# ==========================================
-# STATISTICS
-# ==========================================
+    for x, hue, title, filename in plots:
+        plt.figure(figsize=(7, 5))
+        if hue:
+            sns.countplot(data=df, x=x, hue=hue)
+        else:
+            sns.countplot(data=df, x=x)
+        plt.title(title)
+        plt.xticks(rotation=15)
+        plt.tight_layout()
+        plt.savefig(f"images/{filename}")
+        plt.close()
 
-print("\nStatistical Summary")
-print(df.describe())
+    for col, filename, title in [
+        ("MonthlyCharges", "monthly_charges_distribution.png", "Monthly Charges Distribution"),
+        ("tenure", "tenure_distribution.png", "Tenure Distribution"),
+    ]:
+        plt.figure(figsize=(8, 5))
+        sns.histplot(df[col], bins=30, kde=True)
+        plt.title(title)
+        plt.tight_layout()
+        plt.savefig(f"images/{filename}")
+        plt.close()
 
-# ==========================================
-# FRAUD DISTRIBUTION
-# ==========================================
+    plt.figure(figsize=(8, 5))
+    sns.boxplot(data=df, x="Churn", y="MonthlyCharges")
+    plt.title("Monthly Charges vs Churn")
+    plt.tight_layout()
+    plt.savefig("images/monthlycharges_boxplot.png")
+    plt.close()
 
-print("\nFraud Distribution")
-print(df["Class"].value_counts())
+    df_corr = df.copy()
+    if "customerID" in df_corr.columns:
+        df_corr = df_corr.drop(columns=["customerID"])
+    le = LabelEncoder()
+    for col in df_corr.columns:
+        if not pd.api.types.is_numeric_dtype(df_corr[col]):
+            df_corr[col] = le.fit_transform(df_corr[col].astype(str))
 
-plt.figure(figsize=(6,4))
-sns.countplot(x="Class", data=df)
-plt.title("Fraud vs Genuine Transactions")
-plt.savefig("images/fraud_distribution.png")
-plt.show()
+    plt.figure(figsize=(15, 10))
+    sns.heatmap(df_corr.corr(), annot=True, cmap="coolwarm")
+    plt.title("Correlation Heatmap")
+    plt.tight_layout()
+    plt.savefig("images/correlation_heatmap.png")
+    plt.close()
 
-# ==========================================
-# AMOUNT DISTRIBUTION
-# ==========================================
+    print(f"Saved {len(plots) + 3} charts to 'images/'")
+    print("PART 2 COMPLETE\n")
 
-plt.figure(figsize=(10,5))
-sns.histplot(df["Amount"], bins=50)
-plt.title("Transaction Amount Distribution")
-plt.savefig("images/amount_distribution.png")
-plt.show()
 
-# ==========================================
-# CORRELATION HEATMAP
-# ==========================================
+# ==========================================================
+# PART 3 — ENCODING, MODEL COMPARISON, TRAINING, SAVING
+# ==========================================================
 
-plt.figure(figsize=(18,14))
-sns.heatmap(df.corr(), cmap="coolwarm")
-plt.title("Correlation Heatmap")
-plt.savefig("images/correlation_heatmap.png")
-plt.show()
-
-# ==========================================
-# FEATURES & TARGET
-# ==========================================
-
-X = df.drop("Class", axis=1)
-y = df["Class"]
-
-# ==========================================
-# TRAIN TEST SPLIT
-# ==========================================
-
-X_train, X_test, y_train, y_test = train_test_split(
-    X,
-    y,
-    test_size=0.2,
-    random_state=42,
-    stratify=y
-)
-
-print("\nTraining Shape :", X_train.shape)
-print("Testing Shape :", X_test.shape)
-
-# ==========================================
-# FEATURE SCALING
-# ==========================================
-
-scaler = StandardScaler()
-
-X_train = scaler.fit_transform(X_train)
-X_test = scaler.transform(X_test)
-
-print("\nFeature Scaling Completed")
-
-# ==========================================
-# SMOTE
-# ==========================================
-
-print("\nBefore SMOTE")
-print(y_train.value_counts())
-
-smote = SMOTE(random_state=42)
-
-X_train, y_train = smote.fit_resample(X_train, y_train)
-
-print("\nAfter SMOTE")
-print(pd.Series(y_train).value_counts())
-
-# ==========================================
-# MODEL COMPARISON
-# ==========================================
-
-models = {
-    "Logistic Regression": LogisticRegression(max_iter=1000),
-    "Random Forest": RandomForestClassifier(
-        n_estimators=100,
-        random_state=42,
-        n_jobs=-1
-    ),
-    "XGBoost": XGBClassifier(
-        random_state=42,
-        eval_metric="logloss"
-    )
+# Single source of truth for categorical encoding.
+# app.py uses the EXACT same mapping (COLUMN_ENCODINGS) so a
+# prediction typed into the app lines up with how the model
+# was trained. If you change these, update app.py too.
+ENCODE_MAPS = {
+    "gender": {"Female": 0, "Male": 1},
+    "Partner": {"No": 0, "Yes": 1},
+    "Dependents": {"No": 0, "Yes": 1},
+    "PhoneService": {"No": 0, "Yes": 1},
+    "MultipleLines": {"No": 0, "No phone service": 1, "Yes": 2},
+    "InternetService": {"DSL": 0, "Fiber optic": 1, "No": 2},
+    "OnlineSecurity": {"No": 0, "No internet service": 1, "Yes": 2},
+    "OnlineBackup": {"No": 0, "No internet service": 1, "Yes": 2},
+    "DeviceProtection": {"No": 0, "No internet service": 1, "Yes": 2},
+    "TechSupport": {"No": 0, "No internet service": 1, "Yes": 2},
+    "StreamingTV": {"No": 0, "No internet service": 1, "Yes": 2},
+    "StreamingMovies": {"No": 0, "No internet service": 1, "Yes": 2},
+    "Contract": {"Month-to-month": 0, "One year": 1, "Two year": 2},
+    "PaperlessBilling": {"No": 0, "Yes": 1},
+    "PaymentMethod": {
+        "Bank transfer (automatic)": 0,
+        "Credit card (automatic)": 1,
+        "Electronic check": 2,
+        "Mailed check": 3
+    },
+    "Churn": {"No": 0, "Yes": 1}
 }
 
-results = []
+FEATURE_COLUMNS = [
+    "gender", "SeniorCitizen", "Partner", "Dependents", "tenure",
+    "PhoneService", "MultipleLines", "InternetService", "OnlineSecurity",
+    "OnlineBackup", "DeviceProtection", "TechSupport", "StreamingTV",
+    "StreamingMovies", "Contract", "PaperlessBilling", "PaymentMethod",
+    "MonthlyCharges", "TotalCharges"
+]
 
-for name, model in models.items():
 
-    print("\n" + "="*50)
-    print(f"Training {name}")
-    print("="*50)
+def train_and_save_model(df):
 
-    model.fit(X_train, y_train)
+    import joblib
+    from sklearn.model_selection import train_test_split, cross_val_score
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+    from sklearn.metrics import (
+        accuracy_score, precision_score, recall_score,
+        f1_score, confusion_matrix, classification_report
+    )
 
-    y_pred = model.predict(X_test)
+    print("=" * 60)
+    print("MODEL TRAINING")
+    print("=" * 60)
 
-    accuracy = accuracy_score(y_test, y_pred)
+    df_model = df.copy()
 
-    roc = roc_auc_score(y_test, y_pred)
+    if "customerID" in df_model.columns:
+        df_model = df_model.drop(columns=["customerID"])
 
-    print("Accuracy :", accuracy)
+    for col, mapping in ENCODE_MAPS.items():
+        if col in df_model.columns:
+            df_model[col] = df_model[col].map(mapping)
 
-    print("ROC AUC :", roc)
+    before = len(df_model)
+    df_model = df_model.dropna()
+    after = len(df_model)
+    if before != after:
+        print(f"Dropped {before - after} rows with unrecognized category values.")
 
-    results.append([name, accuracy, roc])
+    X = df_model[FEATURE_COLUMNS]
+    y = df_model["Churn"].astype(int)
 
-best_model = RandomForestClassifier(
-    n_estimators=100,
-    random_state=42,
-    n_jobs=-1
-)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
 
-best_model.fit(X_train, y_train)
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
 
-joblib.dump(best_model, "models/fraud_model.pkl")
-joblib.dump(scaler, "models/scaler.pkl")
+    # ------------------------------------------------------
+    # Compare a few candidate models via cross-validation and
+    # keep the best one, instead of training a single fixed
+    # model blindly.
+    # ------------------------------------------------------
 
-# ==========================================
-# PREDICTION
-# ==========================================
+    candidates = {
+        "LogisticRegression": LogisticRegression(max_iter=1000, class_weight="balanced"),
+        "RandomForest": RandomForestClassifier(
+            n_estimators=200, max_depth=10, random_state=42, class_weight="balanced"
+        ),
+        "GradientBoosting": GradientBoostingClassifier(
+            n_estimators=200, max_depth=3, random_state=42
+        ),
+    }
 
-y_pred = model.predict(X_test)
+    print("\nComparing candidate models (5-fold cross-validation)...")
 
-# ==========================================
-# RESULTS
-# ==========================================
+    best_name, best_model, best_score = None, None, -1.0
 
-accuracy = accuracy_score(y_test, y_pred)
-roc = roc_auc_score(y_test, y_pred)
+    for name, candidate in candidates.items():
+        scores = cross_val_score(candidate, X_train_scaled, y_train, cv=5, scoring="accuracy")
+        mean_score = scores.mean()
+        print(f"  {name:<20} CV Accuracy: {mean_score:.4f}")
+        if mean_score > best_score:
+            best_name, best_model, best_score = name, candidate, mean_score
 
-print("\n" + "="*60)
-print("MODEL PERFORMANCE")
-print("="*60)
+    print(f"\nBest model: {best_name} (CV Accuracy: {best_score:.4f})")
 
-print(f"Accuracy : {accuracy:.4f}")
-print(f"ROC AUC  : {roc:.4f}")
+    best_model.fit(X_train_scaled, y_train)
+    y_pred = best_model.predict(X_test_scaled)
 
-print("\nClassification Report")
-print(classification_report(y_test, y_pred))
+    metrics = {
+        "model_name": best_name,
+        "trained_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        "dataset_rows": int(len(df_model)),
+        "train_rows": int(len(X_train)),
+        "test_rows": int(len(X_test)),
+        "cv_accuracy": round(float(best_score), 4),
+        "test_accuracy": round(float(accuracy_score(y_test, y_pred)), 4),
+        "precision": round(float(precision_score(y_test, y_pred, zero_division=0)), 4),
+        "recall": round(float(recall_score(y_test, y_pred, zero_division=0)), 4),
+        "f1_score": round(float(f1_score(y_test, y_pred, zero_division=0)), 4),
+        "confusion_matrix": confusion_matrix(y_test, y_pred).tolist(),
+    }
 
-print("\nConfusion Matrix")
-cm = confusion_matrix(y_test, y_pred)
-print(cm)
+    print("\nTest Set Performance:")
+    print(f"  Accuracy  : {metrics['test_accuracy'] * 100:.2f}%")
+    print(f"  Precision : {metrics['precision'] * 100:.2f}%")
+    print(f"  Recall    : {metrics['recall'] * 100:.2f}%")
+    print(f"  F1 Score  : {metrics['f1_score'] * 100:.2f}%")
+    print("\nClassification Report:")
+    print(classification_report(y_test, y_pred, zero_division=0))
 
-# ==========================================
-# CONFUSION MATRIX GRAPH
-# ==========================================
+    # ------------------------------------------------------
+    # Feature importance (only available for tree-based models)
+    # ------------------------------------------------------
 
-disp = ConfusionMatrixDisplay(confusion_matrix=cm)
+    if hasattr(best_model, "feature_importances_"):
+        importance_df = pd.DataFrame({
+            "feature": FEATURE_COLUMNS,
+            "importance": best_model.feature_importances_
+        }).sort_values("importance", ascending=False)
+    elif hasattr(best_model, "coef_"):
+        importance_df = pd.DataFrame({
+            "feature": FEATURE_COLUMNS,
+            "importance": np.abs(best_model.coef_[0])
+        }).sort_values("importance", ascending=False)
+    else:
+        importance_df = pd.DataFrame({"feature": FEATURE_COLUMNS, "importance": 0})
 
-disp.plot()
+    # ------------------------------------------------------
+    # Save everything the app needs
+    # ------------------------------------------------------
 
-plt.title("Confusion Matrix")
+    os.makedirs("models", exist_ok=True)
 
-plt.savefig("images/confusion_matrix.png")
+    joblib.dump(best_model, "models/churn_model.pkl")
+    joblib.dump(scaler, "models/scaler.pkl")
 
-plt.show()
+    with open("models/metrics.json", "w") as f:
+        json.dump(metrics, f, indent=2)
 
-# ==========================================
-# FEATURE IMPORTANCE
-# ==========================================
+    importance_df.to_csv("models/feature_importance.csv", index=False)
 
-importance = pd.DataFrame({
-    "Feature": X.columns,
-    "Importance": model.feature_importances_
-})
+    print("\nSaved:")
+    print("  models/churn_model.pkl")
+    print("  models/scaler.pkl")
+    print("  models/metrics.json")
+    print("  models/feature_importance.csv")
+    print("\nPART 3 COMPLETE")
 
-importance = importance.sort_values(
-    by="Importance",
-    ascending=False
-)
 
-plt.figure(figsize=(10,8))
+# ==========================================================
+# ENTRY POINT
+# ==========================================================
+# Guarded so nothing runs if this file is ever imported rather
+# than executed directly. Deployment (streamlit run app.py)
+# never triggers this file at all.
 
-sns.barplot(
-    data=importance.head(15),
-    x="Importance",
-    y="Feature"
-)
+if __name__ == "__main__":
 
-plt.title("Top 15 Important Features")
+    df = load_and_clean_data()
+    run_eda(df)
+    train_and_save_model(df)
 
-plt.savefig("images/feature_importance.png")
-
-plt.show()
-
-# ==========================================
-# SAVE MODEL
-# ==========================================
-
-joblib.dump(model, "models/fraud_model.pkl")
-joblib.dump(scaler, "models/scaler.pkl")
-
-print("\nModel Saved Successfully!")
-
-print("models/fraud_model.pkl")
-print("models/scaler.pkl")
-
-print("\nProject Completed Successfully!")
-results_df = pd.DataFrame(
-    results,
-    columns=["Model", "Accuracy", "ROC AUC"]
-)
-
-print("\n")
-print(results_df)
-plt.figure(figsize=(8,5))
-
-sns.barplot(
-    data=results_df,
-    x="Model",
-    y="Accuracy"
-)
-
-plt.title("Model Comparison")
-
-plt.savefig("images/model_comparison.png")
-
-plt.show()
+    print("\n" + "=" * 60)
+    print("TRAINING PIPELINE FINISHED — ready to run: streamlit run app.py")
+    print("=" * 60)
