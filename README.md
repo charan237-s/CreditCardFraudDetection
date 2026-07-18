@@ -1,5 +1,7 @@
 # Prestige — Customer Churn Prediction
 
+**🔴 [Live Demo](https://customer-churn-prediction-mcbtbtd3hvzfycmpffknan.streamlit.app/)**
+
 An AI-powered dashboard that predicts whether a telecom customer is likely to
 churn (cancel their service), built with Streamlit and scikit-learn.
 
